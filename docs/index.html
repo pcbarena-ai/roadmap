@@ -1,23 +1,46 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>安全访问</title><style>body{font:16px system-ui;background:#10141c;color:#eef2f8;display:grid;place-items:center;min-height:95vh;margin:0}main{width:min(340px,85vw)}input,button{box-sizing:border-box;width:100%;padding:14px;margin:8px 0;border-radius:8px;border:1px solid #657188}button{cursor:pointer}#status{min-height:2em}</style></head><body><main><h1>安全访问</h1><p>请输入访问密码以查看内容。</p><form id="login"><label for="password">访问密码</label><input id="password" type="password" autocomplete="off" required><button type="submit">解锁</button><p id="status" role="status" aria-live="polite"></p></form></main><script>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>安全访问</title><style>body{font:16px system-ui;background:#10141c;color:#eef2f8;margin:0}main{width:min(360px,85vw);margin:12vh auto}input,button{box-sizing:border-box;width:100%;padding:14px;margin:8px 0;border-radius:8px;border:1px solid #657188}input[type=checkbox]{width:auto;margin-right:8px}button{cursor:pointer}#status{min-height:2em}#device-controls{padding:8px 16px}#device-controls button{width:auto}#viewer{display:block;width:100%;height:calc(100vh - 110px);border:0;background:white}[hidden]{display:none!important}</style></head><body><main id="gate"><h1>安全访问</h1><p>请输入访问密码以查看内容。</p><form id="login"><label for="password">访问密码</label><input id="password" type="password" autocomplete="off" required><label><input id="remember" type="checkbox" aria-describedby="remember-risk">记住此设备</label><p id="remember-risk">仅在私人设备上启用：访问密码将明文保存在此浏览器的 localStorage 中。任何可使用此浏览器的人、浏览器扩展或同源脚本都可能读取密码并访问内容；请勿在共享设备上启用。</p><button type="submit">解锁</button></form></main><aside id="device-controls"><button id="forget" type="button" hidden>忘记此设备并锁定</button><p id="status" role="status" aria-live="polite"></p></aside><iframe id="viewer" title="已解锁内容" sandbox="allow-scripts allow-downloads" hidden></iframe><script>
 'use strict';
-const form=document.querySelector('#login');
-form.addEventListener('submit',async event=>{
- event.preventDefault();
- const input=document.querySelector('#password'),button=form.querySelector('button'),status=document.querySelector('#status');
- let password=input.value; input.value=''; button.disabled=true; status.textContent='正在解锁…';
+const form=document.querySelector('#login'),input=document.querySelector('#password'),button=form.querySelector('button'),status=document.querySelector('#status'),remember=document.querySelector('#remember'),forget=document.querySelector('#forget'),viewer=document.querySelector('#viewer'),gate=document.querySelector('#gate');
+const storageKey='encrypted-roadmap.remember.v1';
+forget.addEventListener('click',()=>{
+ let notice='已忘记此设备。';
+ try{localStorage.removeItem(storageKey);}catch(_error){notice='已锁定，但无法清除浏览器凭据；请在浏览器设置中清除此网站的数据。';}
+ viewer.srcdoc=''; viewer.hidden=true; gate.hidden=false; remember.checked=false; forget.hidden=true; status.textContent=notice; input.focus();
+});
+async function unlock(password,persist){
+ input.value=''; button.disabled=true; status.textContent='正在解锁…';
  try {
   const response=await fetch('payload.json',{cache:'no-store'}); if(!response.ok)throw new Error('fetch');
   const payload=await response.json();
   const bytes=value=>Uint8Array.from(atob(value),c=>c.charCodeAt(0));
-  const material=await crypto.subtle.importKey('raw',new TextEncoder().encode(password),'PBKDF2',false,['deriveKey']); password='';
+  const material=await crypto.subtle.importKey('raw',new TextEncoder().encode(password),'PBKDF2',false,['deriveKey']);
   const key=await crypto.subtle.deriveKey({name:'PBKDF2',salt:bytes(payload.salt),iterations:600000,hash:'SHA-256'},material,{name:'AES-GCM',length:256},false,['decrypt']);
   const clear=await crypto.subtle.decrypt({name:'AES-GCM',iv:bytes(payload.iv)},key,bytes(payload.ciphertext));
   const content=JSON.parse(new TextDecoder().decode(clear));
-  const markdownURL=URL.createObjectURL(new Blob([content.markdown],{type:'text/markdown;charset=utf-8'}));
-  // Rewrite source links, including links rendered later from inert source HTML.
+  // A data URL remains downloadable from the opaque-origin sandbox (parent Blob URLs do not).
+  const markdownURL='data:text/markdown;charset=utf-8,'+encodeURIComponent(content.markdown).replace(/'/g,'%27');
   const html=content.html.replace(/(href\s*=\s*["'])([^"']*\broadmap\.md(?:[?#][^"']*)?)(["'])/gi,(_match,start,_url,end)=>start+markdownURL+end+' download="roadmap.md"');
-  document.open(); document.write(html); document.close();
- } catch(_error) { password=''; status.textContent='密码错误或内容无法解锁，请重试。'; button.disabled=false; input.focus(); }
-});
+  let notice='';
+  if(persist){try{localStorage.setItem(storageKey,JSON.stringify({version:1,password}));}catch(_error){notice='已解锁，但浏览器存储不可用，无法记住此设备。';}}
+  password='';
+  viewer.srcdoc=html; viewer.hidden=false; gate.hidden=true; forget.hidden=false; status.textContent=notice;
+ } catch(_error) {
+  password='';
+  if(persist){try{localStorage.removeItem(storageKey);}catch(_storageError){/* Storage may be disabled. */}}
+  status.textContent='密码错误或内容无法解锁，请重试。'; input.focus();
+ }
+ finally { button.disabled=false; }
+}
+form.addEventListener('submit',event=>{event.preventDefault();unlock(input.value,remember.checked);});
+try {
+ const saved=localStorage.getItem(storageKey);
+ if(saved!==null){
+  try {
+   const credential=JSON.parse(saved);
+   if(!credential || credential.version!==1 || typeof credential.password!=='string' || !credential.password)throw new Error('invalid');
+   unlock(credential.password,true);
+  } catch(_error) {localStorage.removeItem(storageKey);status.textContent='已清除无效的设备凭据，请手动解锁。';}
+ }
+} catch(_error) { status.textContent='浏览器存储不可用，请手动解锁。'; }
 </script></body></html>
